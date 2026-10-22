@@ -1,0 +1,46 @@
+# Example dhxpro configuration. Storage is a FeOxDB device file.
+# Create the parent directory before `preflight` or `serve`.
+schema_version: 1
+storage:
+  path: /var/lib/dhxpro/state.feox
+  file_size_mib: 64
+  max_memory_mib: 64
+  hash_bits: 16
+authoritative: true
+subnets:
+  - id: lan
+    interface: eth0
+    cidr: 192.168.1.0/24
+    server_identifier: 192.168.1.1
+    range:
+      start: 192.168.1.100
+      end: 192.168.1.200
+    exclusions:
+      - 192.168.1.150
+    routers:
+      - 192.168.1.1
+    dns_servers:
+      - 192.168.1.1
+    domain_name: lan.example
+    lease_seconds: 3600
+    offer_hold_seconds: 60
+    decline_hold_seconds: 3600
+    allocation_strategy: incremental
+  - id: guest
+    cidr: 10.20.0.0/24
+    server_identifier: 10.20.0.1
+    range:
+      start: 10.20.0.50
+      end: 10.20.0.150
+    exclusions: []
+    routers:
+      - 10.20.0.1
+    dns_servers:
+      - 1.1.1.1
+    lease_seconds: 1800
+    offer_hold_seconds: 30
+    decline_hold_seconds: 1800
+    allocation_strategy: random
+relays:
+  - giaddr: 10.20.0.1
+    subnet_id: guest

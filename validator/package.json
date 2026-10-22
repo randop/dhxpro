@@ -1,0 +1,14 @@
+{
+  "name": "dhxpro-validator",
+  "version": "0.0.0",
+  "private": true,
+  "description": "End-to-end DHCPv4 validator for the dhxpro server",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "bash scripts/run-e2e.sh",
+    "check": "node --check lib/dhcp4.js && node --check lib/harness.js && node --check test/dhcp4.e2e.test.js"
+  }
+}
