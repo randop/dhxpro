@@ -50,4 +50,18 @@ int main(void) { return 0; }
 EOF
 
 "${gcc}" -static -o "${tmp}/io_uring_abi" "${tmp}/io_uring_abi.c"
-echo "io_uring ARMv7 ABI layout matches the io-uring 0.7.15 definitions"
+# Generate actual ARM bindings from the same headers used by the C check.
+# Requires libclang, bindgen-cli 0.69.4 and Python 3 in addition to Rust/Cargo.
+# No ARM emulator is needed: rustc evaluates every assertion at compile time.
+cargo metadata --locked --format-version 1 > "${tmp}/metadata.json"
+sysroot="$("${gcc}" -print-sysroot)"
+bindgen "${tmp}/io_uring_abi.c" --use-core --ctypes-prefix core::ffi \
+    --no-layout-tests --allowlist-type 'io_uring_.*|io_.qring_.*|__kernel_timespec' \
+    --output "${tmp}/arm.rs" -- --target=armv7-unknown-linux-musleabihf \
+    --sysroot="${sysroot}" -isystem "${sysroot}/include"
+python3 scripts/compare-io-uring-bindings.py "${tmp}/metadata.json" \
+    "${tmp}/arm.rs" "${tmp}/compare.rs"
+rustc --edition=2021 --crate-type=lib --emit=metadata \
+    --target armv7-unknown-linux-musleabihf "${tmp}/compare.rs" \
+    -o "${tmp}/compare.rmeta"
+echo "io_uring ARMv7 C and Rust ABI checks passed (sizes, alignments, field offsets and widths)"

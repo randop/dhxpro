@@ -79,10 +79,14 @@ Static ARMv7-A musl release:
 
 ```sh
 scripts/bootstrap-arm-musl.sh   # once, downloads the musl.cc toolchain
-scripts/check-io-uring-abi.sh   # verifies the ARM io_uring ABI layout
-scripts/arm-release.sh
+scripts/arm-release.sh          # checks the ARM io_uring ABI before building
 scripts/check-static-arm.sh
 ```
+
+The ABI check requires Python 3, libclang and `bindgen-cli` 0.69.4
+(`cargo install bindgen-cli --version 0.69.4 --locked`). It retains the C-header
+assertions and compares the selected Rust bindings with ARM-generated bindings
+for sizes, alignments, and non-padding field offsets and widths.
 
 The resulting binary is
 `target/armv7-unknown-linux-musleabihf/release/dhxpro`. The check script
@@ -271,7 +275,7 @@ enabled; otherwise run it as root. See `validator/README.md` for environment
 overrides and current limitations.
 
 The ARM cross-build and ABI check pass locally and the ELF is a static
-`ELF32` ARM executable with no dynamic section. Running on the actual Luckfox
-kernel/filesystem, power-loss durability and measured target RSS are still
-required before claiming production readiness. See `plans/project.md` for the
+`ELF32` ARM executable with no `INTERP` or `NEEDED` entries. Running on the
+actual Luckfox kernel/filesystem, power-loss durability and measured target
+RSS are still required before claiming production readiness. See `plans/project.md` for the
 remaining target milestones.

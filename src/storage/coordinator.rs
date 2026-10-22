@@ -406,7 +406,10 @@ impl StateCoordinator {
                         ));
                     }
                 }
-                OwnerRole::Offer | OwnerRole::Lease | OwnerRole::Decline => {
+                // A quarantine is owned by the IP and may outlast the client's
+                // lease record when that client receives a replacement address.
+                OwnerRole::Decline => {}
+                OwnerRole::Offer | OwnerRole::Lease => {
                     if owner.expires_at != 0 && owner.expires_at <= now {
                         continue; // expired entries are reclaimed by maintenance
                     }

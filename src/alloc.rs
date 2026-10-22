@@ -52,7 +52,13 @@ impl Blocked {
         match self.owners.get(&ip) {
             None => true,
             // The requesting client's own live binding is reusable.
-            Some(owner) if owner.mac == mac && owner.subnet_id == subnet.id => true,
+            Some(owner)
+                if owner.mac == mac
+                    && owner.subnet_id == subnet.id
+                    && owner.role != OwnerRole::Decline =>
+            {
+                true
+            }
             // Expired owners no longer reserve the address; cleanup will
             // remove the index entry lazily.
             Some(owner) if owner.is_expired_at(now) => true,
@@ -116,16 +122,9 @@ pub fn offer_address(
         .and_then(|record| record.entries_by_subnet.get(&subnet.id))
         .cloned();
 
-    // 1. Preserve a live binding for this MAC in this subnet. A declined
-    // address stays quarantined even for the client that declined it; a fixed
-    // reservation does not bypass the hold.
+    // 1. Preserve a live offer/lease for this MAC in this subnet. Declined
+    // addresses remain blocked by their independent IP-owner entries.
     if let Some(entry) = &existing {
-        if entry.state == LeaseState::Declined && entry.is_declined_at(now) {
-            return Err(Error::state(format!(
-                "address {} for {mac} in subnet {:?} is quarantined after a decline until {}",
-                entry.ip, subnet.id, entry.declined_until
-            )));
-        }
         if entry.state == LeaseState::Active {
             if entry.is_active_at(now) && owner_matches(coordinator, subnet, mac, entry)? {
                 return Ok(Some(Offer {
@@ -160,6 +159,12 @@ pub fn offer_address(
                     )));
                 }
                 match blocked.owners.get(&entry.ip) {
+                    Some(owner) if owner.role == OwnerRole::Decline => {
+                        return Err(Error::state(format!(
+                            "address {} for {mac} in subnet {:?} is quarantined after a decline until {}",
+                            entry.ip, subnet.id, owner.expires_at
+                        )))
+                    }
                     Some(owner) if owner.mac != mac => {
                         return Err(Error::state(format!(
                             "reservation conflict: {} is reserved for {mac} in subnet {:?} but \
@@ -614,7 +619,7 @@ pub fn release_lease(
             && owner.role != OwnerRole::Reservation
             && owner.generation == entry.generation
         {
-            ops.push(JournalOp::delete(keys::ip_owner_key(ip)));
+            ops.push(owner_cleanup_op(coordinator, &owner, now)?);
         }
     }
     coordinator.apply(ops, now)?;
@@ -681,7 +686,7 @@ pub fn decline_lease(
     Ok(true)
 }
 
-/// After an expired offer/lease/decline is removed, either delete the IP-owner
+/// After an offer/lease/decline is removed, either delete the IP-owner
 /// entry or restore it to the still-enabled fixed reservation for that MAC.
 fn owner_cleanup_op(
     coordinator: &StateCoordinator,
@@ -736,7 +741,7 @@ pub fn expire_state(
             continue;
         };
         match record.entries_by_subnet.get(&owner.subnet_id) {
-            Some(entry) if entry.generation == owner.generation => {
+            Some(entry) if entry.ip == owner.ip && entry.generation == owner.generation => {
                 if entry.blocks_at(now) {
                     // The lease record is still live; do not remove the owner.
                     continue;
@@ -1445,6 +1450,129 @@ subnets:
         .unwrap()
         .unwrap();
         assert_eq!(reallocated.entry.ip, offer.entry.ip);
+    }
+
+    #[test]
+    fn release_restores_reservation_owner() {
+        let config = config_for("incremental", "192.168.1.100", "192.168.1.100", 3600);
+        let subnet = config.subnet("lan").unwrap();
+        let mut coordinator = setup(&config);
+        let mut rng = SmallRng::seed_from_u64(1);
+        let ip = subnet.range_start;
+        crate::admin::add(&mut coordinator, &config, mac(MAC_A), "lan", ip, None, 1000).unwrap();
+        let offer = offer_address(
+            &mut coordinator,
+            subnet,
+            mac(MAC_A),
+            None,
+            None,
+            1000,
+            &mut rng,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(offer.reserved);
+        commit_lease(&mut coordinator, subnet, mac(MAC_A), ip, None, None, 1010).unwrap();
+        assert!(release_lease(&mut coordinator, subnet, mac(MAC_A), ip, 1020).unwrap());
+        assert!(coordinator.lease(mac(MAC_A)).unwrap().is_none());
+        let owner = coordinator.owner(ip).unwrap().unwrap();
+        assert_eq!(owner.role, OwnerRole::Reservation);
+        assert_eq!(owner.mac, mac(MAC_A));
+        assert_eq!(owner.expires_at, 0);
+        let problems = coordinator.integrity_report(&config, 1020).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    #[test]
+    fn declined_client_gets_replacement_while_ip_stays_quarantined() {
+        for strategy in ["incremental", "random"] {
+            let config = config_for(strategy, "192.168.1.100", "192.168.1.101", 3600);
+            let subnet = config.subnet("lan").unwrap();
+            let mut coordinator = setup(&config);
+            let mut rng = SmallRng::seed_from_u64(1);
+            let offer = offer_address(
+                &mut coordinator,
+                subnet,
+                mac(MAC_A),
+                None,
+                None,
+                1000,
+                &mut rng,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(
+                decline_lease(&mut coordinator, subnet, mac(MAC_A), offer.entry.ip, 1010).unwrap()
+            );
+            let quarantine = coordinator.owner(offer.entry.ip).unwrap().unwrap();
+            let replacement = offer_address(
+                &mut coordinator,
+                subnet,
+                mac(MAC_A),
+                None,
+                None,
+                1020,
+                &mut rng,
+            )
+            .unwrap()
+            .unwrap();
+            assert_ne!(replacement.entry.ip, offer.entry.ip);
+            assert_eq!(
+                coordinator.owner(offer.entry.ip).unwrap().unwrap(),
+                quarantine
+            );
+            let problems = coordinator.integrity_report(&config, 1020).unwrap();
+            assert!(problems.is_empty(), "{problems:?}");
+            assert!(offer_address(
+                &mut coordinator,
+                subnet,
+                mac(MAC_B),
+                None,
+                None,
+                1021,
+                &mut rng,
+            )
+            .unwrap()
+            .is_none());
+
+            // Expiring the replacement must leave the longer quarantine intact,
+            // even though this removes the client's lease record entirely.
+            expire_state(&mut coordinator, replacement.entry.offer_expires_at, 1024).unwrap();
+            assert!(coordinator.lease(mac(MAC_A)).unwrap().is_none());
+            assert_eq!(
+                coordinator.owner(offer.entry.ip).unwrap().unwrap(),
+                quarantine
+            );
+            let problems = coordinator.integrity_report(&config, 1050).unwrap();
+            assert!(problems.is_empty(), "{problems:?}");
+            let replacement = offer_address(
+                &mut coordinator,
+                subnet,
+                mac(MAC_A),
+                None,
+                None,
+                1051,
+                &mut rng,
+            )
+            .unwrap()
+            .unwrap();
+            assert_ne!(replacement.entry.ip, offer.entry.ip);
+            expire_state(&mut coordinator, quarantine.expires_at, 1024).unwrap();
+            assert!(coordinator.owner(offer.entry.ip).unwrap().is_none());
+            assert_eq!(
+                coordinator
+                    .lease(mac(MAC_A))
+                    .unwrap()
+                    .unwrap()
+                    .entries_by_subnet["lan"]
+                    .ip,
+                replacement.entry.ip
+            );
+            let problems = coordinator
+                .integrity_report(&config, quarantine.expires_at)
+                .unwrap();
+            assert!(problems.is_empty(), "{problems:?}");
+        }
     }
 
     #[test]

@@ -313,14 +313,7 @@ impl DhcpServer {
                     if offer.reserved { " (reserved)" } else { "" }
                 );
                 match dhcp::build_offer(request, subnet, offer.entry.ip) {
-                    Ok(payload) => vec![self.outbound(
-                        request,
-                        subnet,
-                        ingress,
-                        MessageType::Offer,
-                        offer.entry.ip,
-                        payload,
-                    )],
+                    Ok(payload) => vec![self.outbound(request, subnet, ingress, payload)],
                     Err(error) => {
                         eprintln!("dhxpro: failed to build OFFER: {error}");
                         Vec::new()
@@ -478,14 +471,7 @@ impl DhcpServer {
                     subnet.id,
                     entry.ip
                 );
-                vec![self.outbound(
-                    request,
-                    subnet,
-                    ingress,
-                    MessageType::Ack,
-                    entry.ip,
-                    payload,
-                )]
+                vec![self.outbound(request, subnet, ingress, payload)]
             }
             Err(error) => {
                 eprintln!("dhxpro: failed to build ACK: {error}");
@@ -654,14 +640,7 @@ impl DhcpServer {
             return Vec::new();
         }
         match dhcp::build_ack(request, subnet, Ipv4Addr::UNSPECIFIED, false) {
-            Ok(payload) => vec![self.outbound(
-                request,
-                subnet,
-                ingress,
-                MessageType::Ack,
-                Ipv4Addr::UNSPECIFIED,
-                payload,
-            )],
+            Ok(payload) => vec![self.outbound(request, subnet, ingress, payload)],
             Err(error) => {
                 eprintln!("dhxpro: failed to build INFORM ACK: {error}");
                 Vec::new()
@@ -680,14 +659,7 @@ impl DhcpServer {
             return Vec::new();
         }
         match dhcp::build_nak(request, subnet, reason) {
-            Ok(payload) => vec![self.outbound(
-                request,
-                subnet,
-                ingress,
-                MessageType::Nak,
-                Ipv4Addr::UNSPECIFIED,
-                payload,
-            )],
+            Ok(payload) => vec![self.outbound(request, subnet, ingress, payload)],
             Err(error) => {
                 eprintln!("dhxpro: failed to build NAK: {error}");
                 Vec::new()
@@ -700,8 +672,6 @@ impl DhcpServer {
         request: &ParsedRequest,
         subnet: &SubnetConfig,
         ingress: &Ingress,
-        kind: MessageType,
-        yiaddr: Ipv4Addr,
         payload: Vec<u8>,
     ) -> Outbound {
         if request.is_relayed() {
@@ -711,18 +681,8 @@ impl DhcpServer {
             };
         }
 
-        let destination = if kind == MessageType::Nak {
-            if !request.ciaddr.is_unspecified() {
-                request.ciaddr
-            } else {
-                Ipv4Addr::BROADCAST
-            }
-        } else if !request.ciaddr.is_unspecified() {
+        let destination = if !request.ciaddr.is_unspecified() {
             request.ciaddr
-        } else if request.broadcast {
-            Ipv4Addr::BROADCAST
-        } else if !yiaddr.is_unspecified() {
-            yiaddr
         } else {
             Ipv4Addr::BROADCAST
         };
@@ -860,6 +820,34 @@ mod tests {
     }
 
     #[test]
+    fn offer_and_ack_broadcast_without_ciaddr_or_broadcast_flag() {
+        let mut server = test_server();
+        let mut discover = discover();
+        discover[10..12].fill(0); // Clear the flags in the wire packet.
+        let replies = server.handle_datagram(&discover, &ingress());
+        assert_eq!(replies.len(), 1);
+        assert!(matches!(
+            replies[0],
+            Outbound::Direct {
+                destination: Ipv4Addr::BROADCAST,
+                ..
+            }
+        ));
+        let offered = reply(&replies[0]).yiaddr();
+        let request = selecting_request(offered, Ipv4Addr::new(192, 168, 1, 1), CLIENT_MAC);
+        let replies = server.handle_datagram(&request, &ingress());
+        assert_eq!(replies.len(), 1);
+        assert!(matches!(
+            replies[0],
+            Outbound::Direct {
+                destination: Ipv4Addr::BROADCAST,
+                ..
+            }
+        ));
+        assert_eq!(reply(&replies[0]).yiaddr(), offered);
+    }
+
+    #[test]
     fn selecting_request_acknowledges_the_offered_address() {
         let mut server = test_server();
         let replies = server.handle_datagram(&discover(), &ingress());
@@ -952,6 +940,9 @@ mod tests {
         assert_eq!(
             reply(&replies[0]).opts().get(OptionCode::MessageType),
             Some(&DhcpOption::MessageType(MessageType::Ack))
+        );
+        assert!(
+            matches!(replies[0], Outbound::Direct { destination, .. } if destination == offered)
         );
         let lease = server
             .coordinator
