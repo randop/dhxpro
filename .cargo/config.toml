@@ -1,0 +1,16 @@
+[target.armv7-unknown-linux-musleabihf]
+linker = "armv7l-linux-musleabihf-gcc"
+# io-uring 0.7.15 ships prebuilt kernel ABI definitions for 64-bit targets
+# only. The io_uring SQE/CQE/params structs use fixed-width integers and
+# aligned_u64 fields, and the ARMv7 EABI gives them the same layout as the
+# x86_64 definitions (verified by scripts/check-io-uring-abi.sh). The arch
+# check is therefore bypassed for this target; there is no runtime fallback.
+rustflags = [
+    "-C",
+    "target-feature=+crt-static",
+    "--cfg",
+    "io_uring_skip_arch_check",
+]
+
+[alias]
+arm-release = "build --release --target armv7-unknown-linux-musleabihf"

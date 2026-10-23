@@ -1,0 +1,101 @@
+#!/bin/sh
+# Buildroot/BusyBox init script for dhxpro.
+#
+# Install as /etc/init.d/S99dhxpro. The S99 prefix starts the service after
+# networking; storage is opened exclusively by the daemon.
+
+DAEMON="${DAEMON:-/usr/sbin/dhxpro}"
+CONFIG="${CONFIG:-/etc/dhxpro.yaml}"
+PIDFILE="${PIDFILE:-/var/run/dhxpro.pid}"
+LOGFILE="${LOGFILE:-/var/log/dhxpro.log}"
+STORAGE_DIR="${STORAGE_DIR:-/var/lib/dhxpro}"
+PREFLIGHT="${PREFLIGHT:-1}"
+
+is_daemon_pid() {
+    # Reject process groups, malformed PIDs, stale files and PID reuse.
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$1" -gt 1 ] 2>/dev/null || return 1
+    kill -0 "$1" 2>/dev/null || return 1
+    [ "/proc/$1/exe" -ef "${DAEMON}" ]
+}
+
+is_running() {
+    [ -f "${PIDFILE}" ] || return 1
+    pid="$(cat "${PIDFILE}" 2>/dev/null || true)"
+    is_daemon_pid "${pid}"
+}
+
+start() {
+    if is_running; then
+        echo "dhxpro is already running (pid $(cat "${PIDFILE}"))"
+        return 0
+    fi
+    rm -f "${PIDFILE}"
+
+    mkdir -p "${STORAGE_DIR}" "$(dirname "${LOGFILE}")"
+
+    if [ "${PREFLIGHT}" = "1" ]; then
+        if ! "${DAEMON}" --config "${CONFIG}" preflight >>"${LOGFILE}" 2>&1; then
+            echo "dhxpro preflight failed; see ${LOGFILE}" >&2
+            return 1
+        fi
+    fi
+
+    "${DAEMON}" --config "${CONFIG}" serve >>"${LOGFILE}" 2>&1 &
+    pid=$!
+    echo "${pid}" >"${PIDFILE}"
+
+    # Give startup failures (bind, storage, io_uring) a moment to surface.
+    sleep 1
+    if ! is_daemon_pid "${pid}"; then
+        echo "dhxpro failed to start; see ${LOGFILE}" >&2
+        rm -f "${PIDFILE}"
+        return 1
+    fi
+    echo "dhxpro started (pid ${pid})"
+}
+
+stop() {
+    if ! is_running; then
+        echo "dhxpro is not running"
+        rm -f "${PIDFILE}"
+        return 0
+    fi
+    # is_running loaded the checked PID; do not reread a changed PID file.
+    if is_daemon_pid "${pid}"; then
+        kill -TERM "${pid}" 2>/dev/null || true
+    fi
+    # The event loop notices the flag on its next one-second timer tick.
+    count=0
+    while is_daemon_pid "${pid}"; do
+        count=$((count + 1))
+        if [ "${count}" -ge 10 ]; then
+            echo "dhxpro did not stop cleanly; sending SIGKILL" >&2
+            if is_daemon_pid "${pid}"; then
+                kill -KILL "${pid}" 2>/dev/null || true
+            fi
+            break
+        fi
+        sleep 1
+    done
+    rm -f "${PIDFILE}"
+    echo "dhxpro stopped"
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; start ;;
+    status)
+        if is_running; then
+            echo "dhxpro is running (pid $(cat "${PIDFILE}"))"
+        else
+            echo "dhxpro is not running"
+            exit 1
+        fi
+        ;;
+    *)
+        echo "usage: $0 {start|stop|restart|status}" >&2
+        exit 1
+        ;;
+esac
